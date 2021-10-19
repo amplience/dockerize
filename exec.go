@@ -1,49 +1,74 @@
 package main
 
 import (
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"golang.org/x/net/context"
 )
 
-func runCmd(name string, args ...string) (int, error) {
-	cmd := exec.Command(name, args...) //nolint:gosec // Subprocess launched with variable.
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	setSysProcAttr(cmd)
+func runCmd(ctx context.Context, cancel context.CancelFunc, cmd string, args ...string) {
+	defer wg.Done()
 
-	err := cmd.Start()
+	process := exec.Command(cmd, args...)
+	process.Stdin = os.Stdin
+	process.Stdout = os.Stdout
+	process.Stderr = os.Stderr
+
+	// start the process
+	err := process.Start()
 	if err != nil {
-		return 0, err
+		log.Fatalf("Error starting command: `%s` - %s\n", cmd, err)
 	}
 
-	const sigcSize = 8
-	sigc := make(chan os.Signal, sigcSize)
-	signal.Notify(sigc,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGQUIT,
-		syscall.SIGABRT,
-		syscall.SIGUSR1,
-		syscall.SIGUSR2,
-		syscall.SIGALRM,
-		syscall.SIGTERM,
-	)
+	// Setup signaling
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL)
+
+	wg.Add(1)
 	go func() {
-		for sig := range sigc {
-			// This will duplicate some signals if they're
-			// sent to all processes in current group (like
-			// when Ctrl-C is pressed in shell).
-			_ = cmd.Process.Signal(sig)
+		defer wg.Done()
+
+		select {
+		case sig := <-sigs:
+			log.Printf("Received signal: %s\n", sig)
+			signalProcessWithTimeout(process, sig)
+			cancel()
+		case <-ctx.Done():
+			// exit when context is done
 		}
 	}()
 
-	_ = cmd.Wait()
+	err = process.Wait()
+	cancel()
 
-	signal.Stop(sigc)
-	close(sigc)
+	if err == nil {
+		log.Println("Command finished successfully.")
+	} else {
+		log.Printf("Command exited with error: %s\n", err)
+		// OPTIMIZE: This could be cleaner
+		os.Exit(err.(*exec.ExitError).Sys().(syscall.WaitStatus).ExitStatus())
+	}
 
-	return cmd.ProcessState.Sys().(syscall.WaitStatus).ExitStatus(), nil
+}
+
+func signalProcessWithTimeout(process *exec.Cmd, sig os.Signal) {
+	done := make(chan struct{})
+
+	go func() {
+		process.Process.Signal(sig) // pretty sure this doesn't do anything. It seems like the signal is automatically sent to the command?
+		process.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return
+	case <-time.After(10 * time.Second):
+		log.Println("Killing command due to timeout.")
+		process.Process.Kill()
+	}
 }

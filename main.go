@@ -4,211 +4,310 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
-	"path"
-	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/net/context"
 )
 
-const (
-	schemeFile           = "file"
-	schemeTCP            = "tcp"
-	schemeTCP4           = "tcp4"
-	schemeTCP6           = "tcp6"
-	schemeUnix           = "unix"
-	schemeHTTP           = "http"
-	schemeHTTPS          = "https"
-	schemeAMQP           = "amqp"
-	schemeAMQPS          = "amqps"
-	defWaitTimeout       = 10 * time.Second
-	defWaitRetryInterval = time.Second
-	exitCodeUsage        = 2
-	exitCodeFatal        = 123
-)
+const defaultWaitRetryInterval = time.Second
 
-// Read-only globals for use only within init() and main().
-//nolint:gochecknoglobals // By design.
+type sliceVar []string
+type hostFlagsVar []string
+
+type Context struct {
+}
+
+type HttpHeader struct {
+	name  string
+	value string
+}
+
+func (c *Context) Env() map[string]string {
+	env := make(map[string]string)
+	for _, i := range os.Environ() {
+		sep := strings.Index(i, "=")
+		env[i[0:sep]] = i[sep+1:]
+	}
+	return env
+}
+
 var (
-	app = strings.TrimSuffix(path.Base(os.Args[0]), ".test")
-	ver = "unknown" // set by ./release
-	cfg struct {
-		version       bool
-		ini           iniConfig
-		templatePaths stringsFlag // file or file:file or dir or dir:dir
-		template      templateConfig
-		waitURLs      urlsFlag
-		wait          waitConfig
-		caCert        string
-		tailStdout    stringsFlag
-		tailStderr    stringsFlag
-		exitCodeFatal int
-	}
+	buildVersion string
+	version      bool
+	poll         bool
+	wg           sync.WaitGroup
+
+	templatesFlag     sliceVar
+	templateDirsFlag  sliceVar
+	stdoutTailFlag    sliceVar
+	stderrTailFlag    sliceVar
+	headersFlag       sliceVar
+	delimsFlag        string
+	delims            []string
+	headers           []HttpHeader
+	urls              []url.URL
+	waitFlag          hostFlagsVar
+	waitRetryInterval time.Duration
+	waitTimeoutFlag   time.Duration
+	dependencyChan    chan struct{}
+	noOverwriteFlag   bool
+
+	ctx    context.Context
+	cancel context.CancelFunc
 )
 
-// One-time initialization shared with tests.
-func init() { //nolint:gochecknoinits // By design.
-	flag.BoolVar(&cfg.version, "version", false, "print version and exit")
-	flag.StringVar(&cfg.ini.source, "env", "", "path or URL to INI file with default values for unset env vars")
-	flag.BoolVar(&cfg.ini.options.AllowPythonMultilineValues, "multiline", false, "allow Python-like multi-line values in INI file")
-	flag.StringVar(&cfg.ini.section, "env-section", "", "section name in INI file")
-	flag.Var(&cfg.ini.headers, "env-header", "`name:value` or path to file containing name:value for HTTP header to send\n(if -env is an URL)\ncan be passed multiple times")
-	flag.Var(&cfg.templatePaths, "template", "template `src:dst` file or dir paths, :dst part is optional\ncan be passed multiple times")
-	flag.BoolVar(&cfg.template.noOverwrite, "no-overwrite", false, "do not overwrite existing destination file from template")
-	flag.BoolVar(&cfg.template.strict, "template-strict", false, "fail if template mention unset environment variable")
-	flag.Var(&cfg.template.delims, "delims", "action delimiters in templates")
-	flag.Var(&cfg.waitURLs, "wait", "wait for `url` (file/tcp/tcp4/tcp6/unix/http/https/amqp/amqps)\ncan be passed multiple times")
-	flag.Var(&cfg.wait.headers, "wait-http-header", "`name:value` for HTTP header to send\n(if -wait use HTTP)\ncan be passed multiple times")
-	flag.BoolVar(&cfg.wait.skipTLSVerify, "skip-tls-verify", false, "skip TLS verification for HTTPS/AMQPS -wait and -env urls")
-	flag.StringVar(&cfg.caCert, "cacert", "", "path to CA certificate for HTTPS/AMQPS -wait and -env urls")
-	flag.BoolVar(&cfg.wait.skipRedirect, "wait-http-skip-redirect", false, "do not follow HTTP redirects\n(if -wait use HTTP)")
-	flag.Var(&cfg.wait.statusCodes, "wait-http-status-code", "HTTP status `code` to wait for (2xx by default)\ncan be passed multiple times")
-	flag.DurationVar(&cfg.wait.timeout, "timeout", defWaitTimeout, "timeout for -wait")
-	flag.DurationVar(&cfg.wait.delay, "wait-retry-interval", defWaitRetryInterval, "delay before retrying failed -wait")
-	flag.Var(&cfg.tailStdout, "stdout", "file `path` to tail to stdout\ncan be passed multiple times")
-	flag.Var(&cfg.tailStderr, "stderr", "file `path` to tail to stderr\ncan be passed multiple times")
-	flag.IntVar(&cfg.exitCodeFatal, "exit-code", exitCodeFatal, "exit code for dockerize errors")
-
-	flag.Usage = usage
+func (i *hostFlagsVar) String() string {
+	return fmt.Sprint(*i)
 }
 
-func main() { //nolint:gocyclo,gocognit,funlen // TODO Refactor?
-	if !flag.Parsed() { // flags may be already parsed by tests
-		flag.Parse()
-	}
+func (i *hostFlagsVar) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
 
-	var iniURL, iniHTTP, templatePathBad, waitBadScheme, waitHTTP, waitAMQPS bool
-	if u, err := url.Parse(cfg.ini.source); err == nil && u.IsAbs() {
-		iniURL = true
-		iniHTTP = u.Scheme == schemeHTTP || u.Scheme == schemeHTTPS
-	}
-	for _, path := range cfg.templatePaths {
-		const maxParts = 2
-		parts := strings.Split(path, ":")
-		templatePathBad = templatePathBad || path == "" || parts[0] == "" || len(parts) > maxParts
-	}
-	for _, u := range cfg.waitURLs {
-		switch u.Scheme {
-		case schemeFile, schemeTCP, schemeTCP4, schemeTCP6, schemeUnix:
-		case schemeHTTP, schemeHTTPS:
-			waitHTTP = true
-		case schemeAMQP:
-		case schemeAMQPS:
-			waitAMQPS = true
-		default:
-			waitBadScheme = true
+func (s *sliceVar) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
+func (s *sliceVar) String() string {
+	return strings.Join(*s, ",")
+}
+
+func waitForDependencies() {
+	dependencyChan := make(chan struct{})
+
+	go func() {
+		for _, u := range urls {
+			log.Println("Waiting for:", u.String())
+
+			switch u.Scheme {
+			case "file":
+				wg.Add(1)
+				go func(u url.URL) {
+					defer wg.Done()
+					ticker := time.NewTicker(waitRetryInterval)
+					defer ticker.Stop()
+					var err error
+					for range ticker.C {
+						if _, err = os.Stat(u.Path); err == nil {
+							log.Printf("File %s had been generated\n", u.String())
+							return
+						} else if os.IsNotExist(err) {
+							continue
+						} else {
+							log.Printf("Problem with check file %s exist: %v. Sleeping %s\n", u.String(), err.Error(), waitRetryInterval)
+
+						}
+					}
+				}(u)
+			case "tcp", "tcp4", "tcp6":
+				waitForSocket(u.Scheme, u.Host, waitTimeoutFlag)
+			case "unix":
+				waitForSocket(u.Scheme, u.Path, waitTimeoutFlag)
+			case "http", "https":
+				wg.Add(1)
+				go func(u url.URL) {
+					client := &http.Client{
+						Timeout: waitTimeoutFlag,
+					}
+
+					defer wg.Done()
+					for {
+						req, err := http.NewRequest("GET", u.String(), nil)
+						if err != nil {
+							log.Printf("Problem with dial: %v. Sleeping %s\n", err.Error(), waitRetryInterval)
+							time.Sleep(waitRetryInterval)
+						}
+						if len(headers) > 0 {
+							for _, header := range headers {
+								req.Header.Add(header.name, header.value)
+							}
+						}
+
+						resp, err := client.Do(req)
+						if err != nil {
+							log.Printf("Problem with request: %s. Sleeping %s\n", err.Error(), waitRetryInterval)
+							time.Sleep(waitRetryInterval)
+						} else if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+							log.Printf("Received %d from %s\n", resp.StatusCode, u.String())
+							return
+						} else {
+							log.Printf("Received %d from %s. Sleeping %s\n", resp.StatusCode, u.String(), waitRetryInterval)
+							time.Sleep(waitRetryInterval)
+						}
+					}
+				}(u)
+			default:
+				log.Fatalf("invalid host protocol provided: %s. supported protocols are: tcp, tcp4, tcp6 and http", u.Scheme)
+			}
 		}
-	}
-	switch {
-	case flag.NArg() == 0 && flag.NFlag() == 0:
-		flag.Usage()
-		os.Exit(exitCodeUsage)
-	case iniURL && !iniHTTP:
-		fatalFlagValue("scheme must be http/https", "env", cfg.ini.source)
-	case len(cfg.ini.headers) > 0 && !iniHTTP:
-		fatalFlagValue("require -env with HTTP url", "env-header", cfg.ini.headers)
-	case templatePathBad:
-		fatalFlagValue("require src:dst or src", "template", cfg.templatePaths)
-	case cfg.template.noOverwrite && len(cfg.templatePaths) == 0:
-		fatalFlagValue("require -template", "no-overwrite", cfg.template.noOverwrite)
-	case cfg.template.strict && len(cfg.templatePaths) == 0:
-		fatalFlagValue("require -template", "template-strict", cfg.template.strict)
-	case cfg.template.delims[0] != "" && len(cfg.templatePaths) == 0:
-		fatalFlagValue("require -template", "delims", cfg.template.delims)
-	case waitBadScheme:
-		fatalFlagValue("scheme must be file/tcp/tcp4/tcp6/unix/http/https/amqp/amqps", "wait", cfg.waitURLs)
-	case len(cfg.wait.headers) > 0 && !waitHTTP:
-		fatalFlagValue("require -wait with HTTP url", "wait-http-header", cfg.wait.headers)
-	case len(cfg.wait.statusCodes) > 0 && !waitHTTP:
-		fatalFlagValue("require -wait with HTTP url", "wait-http-status-code", cfg.wait.statusCodes)
-	case cfg.wait.skipRedirect && !waitHTTP:
-		fatalFlagValue("require -wait with HTTP url", "wait-http-skip-redirect", cfg.wait.skipRedirect)
-	case cfg.wait.skipTLSVerify && !iniHTTP && !waitHTTP && !waitAMQPS:
-		fatalFlagValue("require -wait/-env with HTTP url", "skip-tls-verify", cfg.wait.skipTLSVerify)
-	case cfg.caCert != "" && !iniHTTP && !waitHTTP && !waitAMQPS:
-		fatalFlagValue("require -wait/-env with HTTP url", "cacert", cfg.caCert)
-	case cfg.version:
-		fmt.Println(app, ver, runtime.Version())
-		os.Exit(0)
+		wg.Wait()
+		close(dependencyChan)
+	}()
+
+	select {
+	case <-dependencyChan:
+		break
+	case <-time.After(waitTimeoutFlag):
+		log.Fatalf("Timeout after %s waiting on dependencies to become available: %v", waitTimeoutFlag, waitFlag)
 	}
 
-	var err error
-	cfg.ini.skipTLSVerify = cfg.wait.skipTLSVerify
-	cfg.wait.ca, err = LoadCACert(cfg.caCert)
-	if err != nil {
-		fatalf("Failed to load CA cert: %s", err)
-	}
-	cfg.ini.ca = cfg.wait.ca
-	if cfg.template.delims[0] == "" {
-		cfg.template.delims = [2]string{"{{", "}}"}
-	}
+}
 
-	defaultEnv, err := loadINISection(cfg.ini)
-	if err != nil {
-		fatalf("Failed to load INI: %s.", err)
-	}
-
-	setDefaultEnv(defaultEnv)
-
-	cfg.template.data.Env = getEnv()
-	err = processTemplatePaths(cfg.template, cfg.templatePaths)
-	if err != nil {
-		fatalf("Failed to process templates: %s.", err)
-	}
-
-	err = waitForURLs(cfg.wait, cfg.waitURLs)
-	if err != nil {
-		fatalf("Failed to wait: %s.", err)
-	}
-
-	for _, path := range cfg.tailStdout {
-		tailFile(path, os.Stdout)
-	}
-	for _, path := range cfg.tailStderr {
-		tailFile(path, os.Stderr)
-	}
-
-	switch {
-	case flag.NArg() > 0:
-		code, err := runCmd(flag.Arg(0), flag.Args()[1:]...)
-		if err != nil {
-			fatalf("Failed to run command: %s.", err)
+func waitForSocket(scheme, addr string, timeout time.Duration) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			conn, err := net.DialTimeout(scheme, addr, waitTimeoutFlag)
+			if err != nil {
+				log.Printf("Problem with dial: %v. Sleeping %s\n", err.Error(), waitRetryInterval)
+				time.Sleep(waitRetryInterval)
+			}
+			if conn != nil {
+				log.Printf("Connected to %s://%s\n", scheme, addr)
+				return
+			}
 		}
-		os.Exit(code)
-	case len(cfg.tailStdout)+len(cfg.tailStderr) > 0:
-		select {}
-	}
-}
-
-func warnIfFail(f func() error) {
-	if err := f(); err != nil {
-		log.Printf("Warning: %s.", err)
-	}
-}
-
-func fatalf(format string, v ...interface{}) {
-	log.Printf(format, v...)
-	os.Exit(cfg.exitCodeFatal)
+	}()
 }
 
 func usage() {
-	fmt.Println(`Usage:
-  dockerize options [ command [ arg ... ] ]
-  dockerize [ options ] command [ arg ... ]
+	println(`Usage: dockerize [options] [command]
 
-Utility to simplify running applications in docker containers.
+Utility to simplify running applications in docker containers
 
 Options:`)
 	flag.PrintDefaults()
-	fmt.Println()
-	fmt.Println(`Example: Generate /etc/nginx/nginx.conf using nginx.tmpl as a template, tail nginx logs, wait for a website to become available on port 8000 and then start nginx.`)
-	fmt.Println(`
+
+	println(`
+Arguments:
+  command - command to be executed
+  `)
+
+	println(`Examples:
+`)
+	println(`   Generate /etc/nginx/nginx.conf using nginx.tmpl as a template, tail /var/log/nginx/access.log
+   and /var/log/nginx/error.log, waiting for a website to become available on port 8000 and start nginx.`)
+	println(`
    dockerize -template nginx.tmpl:/etc/nginx/nginx.conf \
              -stdout /var/log/nginx/access.log \
              -stderr /var/log/nginx/error.log \
-             -wait tcp://web:8000 \
-             nginx -g 'daemon off;'
+             -wait tcp://web:8000 nginx
 	`)
-	fmt.Println(`For more information, see https://github.com/powerman/dockerize`)
+
+	println(`For more information, see https://github.com/jwilder/dockerize`)
+}
+
+func main() {
+
+	flag.BoolVar(&version, "version", false, "show version")
+	flag.BoolVar(&poll, "poll", false, "enable polling")
+
+	flag.Var(&templatesFlag, "template", "Template (/template:/dest). Can be passed multiple times. Does also support directories")
+	flag.BoolVar(&noOverwriteFlag, "no-overwrite", false, "Do not overwrite destination file if it already exists.")
+	flag.Var(&stdoutTailFlag, "stdout", "Tails a file to stdout. Can be passed multiple times")
+	flag.Var(&stderrTailFlag, "stderr", "Tails a file to stderr. Can be passed multiple times")
+	flag.StringVar(&delimsFlag, "delims", "", `template tag delimiters. default "{{":"}}" `)
+	flag.Var(&headersFlag, "wait-http-header", "HTTP headers, colon separated. e.g \"Accept-Encoding: gzip\". Can be passed multiple times")
+	flag.Var(&waitFlag, "wait", "Host (tcp/tcp4/tcp6/http/https/unix/file) to wait for before this container starts. Can be passed multiple times. e.g. tcp://db:5432")
+	flag.DurationVar(&waitTimeoutFlag, "timeout", 10*time.Second, "Host wait timeout")
+	flag.DurationVar(&waitRetryInterval, "wait-retry-interval", defaultWaitRetryInterval, "Duration to wait before retrying")
+
+	flag.Usage = usage
+	flag.Parse()
+
+	if version {
+		fmt.Println(buildVersion)
+		return
+	}
+
+	if flag.NArg() == 0 && flag.NFlag() == 0 {
+		usage()
+		os.Exit(1)
+	}
+
+	if delimsFlag != "" {
+		delims = strings.Split(delimsFlag, ":")
+		if len(delims) != 2 {
+			log.Fatalf("bad delimiters argument: %s. expected \"left:right\"", delimsFlag)
+		}
+	}
+
+	for _, host := range waitFlag {
+		u, err := url.Parse(host)
+		if err != nil {
+			log.Fatalf("bad hostname provided: %s. %s", host, err.Error())
+		}
+		urls = append(urls, *u)
+	}
+
+	for _, h := range headersFlag {
+		//validate headers need -wait options
+		if len(waitFlag) == 0 {
+			log.Fatalf("-wait-http-header \"%s\" provided with no -wait option", h)
+		}
+
+		const errMsg = "bad HTTP Headers argument: %s. expected \"headerName: headerValue\""
+		if strings.Contains(h, ":") {
+			parts := strings.Split(h, ":")
+			if len(parts) != 2 {
+				log.Fatalf(errMsg, headersFlag)
+			}
+			headers = append(headers, HttpHeader{name: strings.TrimSpace(parts[0]), value: strings.TrimSpace(parts[1])})
+		} else {
+			log.Fatalf(errMsg, headersFlag)
+		}
+
+	}
+
+	for _, t := range templatesFlag {
+		template, dest := t, ""
+		if strings.Contains(t, ":") {
+			parts := strings.Split(t, ":")
+			if len(parts) != 2 {
+				log.Fatalf("bad template argument: %s. expected \"/template:/dest\"", t)
+			}
+			template, dest = parts[0], parts[1]
+		}
+
+		fi, err := os.Stat(template)
+		if err != nil {
+			log.Fatalf("unable to stat %s, error: %s", template, err)
+		}
+		if fi.IsDir() {
+			generateDir(template, dest)
+		} else {
+			generateFile(template, dest)
+		}
+	}
+
+	waitForDependencies()
+
+	// Setup context
+	ctx, cancel = context.WithCancel(context.Background())
+
+	if flag.NArg() > 0 {
+		wg.Add(1)
+		go runCmd(ctx, cancel, flag.Arg(0), flag.Args()[1:]...)
+	}
+
+	for _, out := range stdoutTailFlag {
+		wg.Add(1)
+		go tailFile(ctx, out, poll, os.Stdout)
+	}
+
+	for _, err := range stderrTailFlag {
+		wg.Add(1)
+		go tailFile(ctx, err, poll, os.Stderr)
+	}
+
+	wg.Wait()
 }
