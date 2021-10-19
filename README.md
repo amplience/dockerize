@@ -1,33 +1,7 @@
-# dockerize [![GitHub release](https://img.shields.io/github/release/powerman/dockerize.svg)](https://github.com/powerman/dockerize/releases/latest) [![CI Build Status](https://circleci.com/gh/powerman/dockerize.svg?style=svg)](https://circleci.com/gh/powerman/dockerize) [![Docker Build Status](https://img.shields.io/docker/build/powerman/dockerize.svg)](https://hub.docker.com/r/powerman/dockerize/) [![Go Report Card](https://goreportcard.com/badge/github.com/powerman/dockerize)](https://goreportcard.com/report/github.com/powerman/dockerize) [![Coverage Status](https://coveralls.io/repos/github/powerman/dockerize/badge.svg?branch=master)](https://coveralls.io/github/powerman/dockerize?branch=master)
+dockerize ![version v0.6.1](https://img.shields.io/badge/version-v0.6.1-brightgreen.svg) ![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+=============
 
 Utility to simplify running applications in docker containers.
-
-**About this fork:** This fork is supposed to become a community-maintained replacement for
-[not maintained](https://github.com/powerman/dockerize/issues/19)
-[original repo](https://github.com/jwilder/dockerize). Everyone who has
-contributed to the project may become a collaborator - just ask for it
-in PR comments after your PR has being merged.
-
-<!-- START doctoc generated TOC please keep comment here to allow auto update -->
-<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
-**Table of Contents**
-
-- [Overview](#overview)
-- [Installation](#installation)
-  - [Docker Base Image](#docker-base-image)
-- [Usage](#usage)
-  - [Command-line Options](#command-line-options)
-  - [Waiting for other dependencies](#waiting-for-other-dependencies)
-  - [Timeout](#timeout)
-  - [Use custom CA for SSL cert verification for https/amqps connections](#use-custom-ca-for-ssl-cert-verification-for-httpsamqps-connections)
-  - [Skip SSL cert verification for https/amqps connections](#skip-ssl-cert-verification-for-httpsamqps-connections)
-  - [Injecting env vars from INI file](#injecting-env-vars-from-ini-file)
-- [Using Templates](#using-templates)
-  - [jsonQuery](#jsonquery)
-
-<!-- END doctoc generated TOC please keep comment here to allow auto update -->
-
-## Overview
 
 dockerize is a utility to simplify running applications in docker containers.  It allows you to:
 * generate application configuration files at container startup time from templates and container environment variables
@@ -52,56 +26,44 @@ See [A Simple Way To Dockerize Applications](http://jasonwilder.com/blog/2014/10
 
 ## Installation
 
-Dockerize is a statically compiled binary, so it should work with any base image.
+Download the latest version in your container:
 
-To download it with most base images all you need is to install `curl` first:
+* [linux/amd64](https://github.com/jwilder/dockerize/releases/download/v0.6.1/dockerize-linux-amd64-v0.6.1.tar.gz)
+* [alpine/amd64](https://github.com/jwilder/dockerize/releases/download/v0.6.1/dockerize-alpine-linux-amd64-v0.6.1.tar.gz)
+* [darwin/amd64](https://github.com/jwilder/dockerize/releases/download/v0.6.1/dockerize-darwin-amd64-v0.6.1.tar.gz)
 
-```sh
-### alpine:
-apk add curl
-
-### debian, ubuntu:
-apt update && apt install -y curl
-```
-
-and then either install the latest version:
-
-```sh
-curl -sfL $(curl -s https://api.github.com/repos/powerman/dockerize/releases/latest | grep -i /dockerize-$(uname -s)-$(uname -m)\" | cut -d\" -f4) | install /dev/stdin /usr/local/bin/dockerize
-```
-
-or specific version:
-
-```sh
-curl -sfL https://github.com/powerman/dockerize/releases/download/v0.11.5/dockerize-`uname -s`-`uname -m` | install /dev/stdin /usr/local/bin/dockerize
-```
-
-If `curl` is not available (e.g. busybox base image) then you can use `wget`:
-
-```
-### busybox: latest version
-wget -O - $(wget -O - https://api.github.com/repos/powerman/dockerize/releases/latest | grep -i /dockerize-$(uname -s)-$(uname -m)\" | cut -d\" -f4) | install /dev/stdin /usr/local/bin/dockerize
-
-### busybox: specific version
-wget -O - https://github.com/powerman/dockerize/releases/download/v0.11.5/dockerize-`uname -s`-`uname -m` | install /dev/stdin /usr/local/bin/dockerize
-```
-
-PGP public key for verifying signed binaries: https://powerman.name/about/Powerman.asc
-
-```
-curl -sfL https://powerman.name/about/Powerman.asc | gpg --import
-curl -sfL https://github.com/powerman/dockerize/releases/download/v0.11.5/dockerize-`uname -s`-`uname -m`.asc >dockerize.asc
-gpg --verify dockerize.asc /usr/local/bin/dockerize
-```
 
 ### Docker Base Image
 
-The `powerman/dockerize` image is a base image based on `alpine linux`.  `dockerize` is installed in the `$PATH` and can be used directly.
+The `jwilder/dockerize` image is a base image based on `alpine linux`.  `dockerize` is installed in the `$PATH` and can be used directly.
 
 ```
-FROM powerman/dockerize
+FROM jwilder/dockerize
 ...
 ENTRYPOINT dockerize ...
+```
+
+### Ubuntu Images
+
+``` Dockerfile
+RUN apt-get update && apt-get install -y wget
+
+ENV DOCKERIZE_VERSION v0.6.1
+RUN wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && tar -C /usr/local/bin -xzvf dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && rm dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz
+```
+
+
+### For Alpine Images:
+
+``` Dockerfile
+RUN apk add --no-cache openssl
+
+ENV DOCKERIZE_VERSION v0.6.1
+RUN wget https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-alpine-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && tar -C /usr/local/bin -xzvf dockerize-alpine-linux-amd64-$DOCKERIZE_VERSION.tar.gz \
+    && rm dockerize-alpine-linux-amd64-$DOCKERIZE_VERSION.tar.gz
 ```
 
 ## Usage
@@ -132,7 +94,7 @@ $ dockerize -template template1.tmpl
 
 ```
 
-Template may also be a directory. In this case all files within this directory are recursively processed as template and stored with the same name in the destination directory.
+Template may also be a directory. In this case all files within this directory are processed as template and stored with the same name in the destination directory.
 If the destination directory is omitted, the output is sent to `STDOUT`. The files in the source directory are processed in sorted order (as returned by `ioutil.ReadDir`).
 
 ```
@@ -153,44 +115,30 @@ $ dockerize -stdout info.log -stdout perf.log
 
 ```
 
+If `inotify` does not work in you container, you use `-poll` to poll for file changes instead.
+
+```
+$ dockerize -stdout info.log -stdout perf.log -poll
+
+```
+
 If your file uses `{{` and `}}` as part of it's syntax, you can change the template escape characters using the `-delims`.
 
 ```
-$ dockerize -delims "<%:%>" -template template1.tmpl
+$ dockerize -delims "<%:%>"
 ```
 
-You can require all environment variables mentioned in template exists
-with `-template-strict`:
-
-```
-$ dockerize -template-strict -template template1.tmpl
-```
-
-HTTP headers can be specified for http/https protocols.
-If header is specified as a file path then file must contain single string with `Header: value`.
+Http headers can be specified for http/https protocols.
 
 ```
 $ dockerize -wait http://web:80 -wait-http-header "Authorization:Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
 ```
 
-Required HTTP status codes can be specified, otherwise any 2xx status will
-be accepted.
-
-```
-$ dockerize -wait http://web:80 -wait-http-status-code 302 -wait-http-status-code 200
-```
-
-HTTP redirects can be ignored:
-
-```
-$ dockerize -wait http://web:80 -wait-http-skip-redirect
-```
-
-### Waiting for other dependencies
+## Waiting for other dependencies
 
 It is common when using tools like [Docker Compose](https://docs.docker.com/compose/) to depend on services in other linked containers, however oftentimes relying on [links](https://docs.docker.com/compose/compose-file/#links) is not enough - whilst the container itself may have _started_, the _service(s)_ within it may not yet be ready - resulting in shell script hacks to work around race conditions.
 
-Dockerize gives you the ability to wait for services on a specified protocol (`file`, `tcp`, `tcp4`, `tcp6`, `http`, `https`, `amqp`, `amqps` and `unix`) before starting your application:
+Dockerize gives you the ability to wait for services on a specified protocol (`file`, `tcp`, `tcp4`, `tcp6`, `http`, `https` and `unix`) before starting your application:
 
 ```
 $ dockerize -wait tcp://db:5432 -wait http://web:80 -wait file:///tmp/generated-file
@@ -198,37 +146,13 @@ $ dockerize -wait tcp://db:5432 -wait http://web:80 -wait file:///tmp/generated-
 
 ### Timeout
 
-You can optionally specify how long to wait for the services to become available by using the `-timeout #` argument (Default: 10 seconds).  If the timeout is reached and the service is still not available, the process exits with status code 123.
+You can optionally specify how long to wait for the services to become available by using the `-timeout #` argument (Default: 10 seconds).  If the timeout is reached and the service is still not available, the process exits with status code 1.
 
 ```
 $ dockerize -wait tcp://db:5432 -wait http://web:80 -timeout 10s
 ```
 
 See [this issue](https://github.com/docker/compose/issues/374#issuecomment-126312313) for a deeper discussion, and why support isn't and won't be available in the Docker ecosystem itself.
-
-### Use custom CA for SSL cert verification for https/amqps connections
-
-```
-$ dockerize -cacert /path/to/ca.pem -wait https://web:80
-```
-
-### Skip SSL cert verification for https/amqps connections
-
-```
-$ dockerize -skip-tls-verify -wait https://web:80
-```
-
-### Injecting env vars from INI file
-
-You can load defaults for missing env vars from INI file.
-Multiline flag allows parsing multiline INI entries.
-File with header must contain single string with `Header: value`.
-
-```
-$ dockerize -env /path/to/file.ini -env-section SectionName -multiline …
-$ dockerize -env http://localhost:80/file.ini \
-    -env-header "Header: value" -env-header /path/to/file/with/header …
-```
 
 ## Using Templates
 
@@ -239,25 +163,21 @@ variables within a template with `.Env`.
 {{ .Env.PATH }} is my path
 ```
 
-In template you can use a lot of [functions provided by
-Sprig](http://masterminds.github.io/sprig/) plus a few built in functions as well:
+There are a few built in functions as well:
 
-  * `exists $path` - Determines if a file path exists or not. `{{ if exists "/etc/default/myapp" }}`
-  * `parseUrl $url` - Parses a URL into it's [protocol, scheme, host, etc. parts](https://golang.org/pkg/net/url/#URL). Alias for [`url.Parse`](https://golang.org/pkg/net/url/#Parse)
+  * `default $var $default` - Returns a default value for one that does not exist. `{{ default .Env.VERSION "0.1.2" }}`
+  * `contains $map $key` - Returns true if a string is within another string
+  * `exists $path` - Determines if a file path exists or not. `{{ exists "/etc/default/myapp" }}`
+  * `split $string $sep` - Splits a string into an array using a separator string. Alias for [`strings.Split`][go.string.Split]. `{{ split .Env.PATH ":" }}`
+  * `replace $string $old $new $count` - Replaces all occurrences of a string within another string. Alias for [`strings.Replace`][go.string.Replace]. `{{ replace .Env.PATH ":" }}`
+  * `parseUrl $url` - Parses a URL into it's [protocol, scheme, host, etc. parts][go.url.URL]. Alias for [`url.Parse`][go.url.Parse]
+  * `atoi $value` - Parses a string $value into an int. `{{ if (gt (atoi .Env.NUM_THREADS) 1) }}`
+  * `add $arg1 $arg` - Performs integer addition. `{{ add (atoi .Env.SHARD_NUM) -1 }}`
   * `isTrue $value` - Parses a string $value to a boolean value. `{{ if isTrue .Env.ENABLED }}`
+  * `lower $value` - Lowercase a string.
+  * `upper $value` - Uppercase a string.
   * `jsonQuery $json $query` - Returns the result of a selection query against a json document.
-  * `readFile $fileName` - Returns the content of the named file or empty string if file not exists.
-
-**WARNING! Incompatibility with [original dockerize
-v0.6.1](https://github.com/jwilder/dockerize)!** These template functions
-was changed because of adding Sprig functions, so carefully review your
-templates before upgrading:
-
-* `default` - order of params has changed.
-* `contains` - now it works on string instead of map, use `hasKey` instead.
-* `split` - now it split into map instead of list, use `splitList` instead.
-* `replace` - order and amount of params has changed.
-* `loop` - removed, use `untilStep` instead.
+  * `loop` - Create for loops.
 
 ### jsonQuery
 
@@ -282,3 +202,34 @@ With the following JSON in `.Env.SERVICES`
 ```
 
 the template expression `jsonQuery .Env.SERVICES "services.[1].port"` returns `9000`.
+
+### loop
+
+`loop` allows for creating for loop within a template.  It takes 1 to 3 arguments.
+
+```
+# Loop from 0...10
+{{ range loop 10 }}
+i = {{ . }}
+{{ end }}
+
+# Loop from 5...10
+{{ range $i := loop 5 10 }}
+i = {{ $i }}
+{{ end }}
+
+# Loop from 5...10 by 2
+{{ range $i := loop 5 10 2 }}
+i = {{ $i }}
+{{ end }}
+```
+
+## License
+
+MIT
+
+
+[go.string.Split]: https://golang.org/pkg/strings/#Split
+[go.string.Replace]: https://golang.org/pkg/strings/#Replace
+[go.url.Parse]: https://golang.org/pkg/net/url/#Parse
+[go.url.URL]: https://golang.org/pkg/net/url/#URL

@@ -1,18 +1,17 @@
-FROM golang:1.16.5-alpine3.14 AS builder
-SHELL ["/bin/ash","-e","-o","pipefail","-x","-c"]
+FROM golang:1.13.7-alpine3.11 AS binary
+RUN apk -U add openssl git
 
-LABEL org.opencontainers.image.source="https://github.com/powerman/dockerize"
+ADD . /go/src/github.com/jwilder/dockerize
+WORKDIR /go/src/github.com/jwilder/dockerize
 
-RUN apk add --no-cache openssl=~1.1.1k git=~2.32.0
+RUN go get github.com/robfig/glock
+RUN glock sync -n < GLOCKFILE
+RUN go install
 
-COPY . /src
-WORKDIR /src
+FROM alpine:3.11
+MAINTAINER Jason Wilder <mail@jasonwilder.com>
 
-RUN CGO_ENABLED=0 go install -ldflags "-X 'main.ver=$(git describe --match='v*' --exact-match)'"
-
-FROM alpine:3.14
-
-COPY --from=builder /go/bin/dockerize /usr/local/bin
+COPY --from=binary /go/bin/dockerize /usr/local/bin
 
 ENTRYPOINT ["dockerize"]
 CMD ["--help"]
